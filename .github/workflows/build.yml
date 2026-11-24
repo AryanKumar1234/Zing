@@ -1,4 +1,4 @@
-name: Extract zip, build and publish APK
+name: Extract zips, build and publish APKs
 
 on:
   push:
@@ -22,21 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract source zip
-        run: |
-          ZIP=$(find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" | head -n 1)
-          mkdir -p "$RUNNER_TEMP/src"
-          if [ -n "$ZIP" ]; then
-            echo "Extracting $ZIP"
-            unzip -q "$ZIP" -d "$RUNNER_TEMP/src"
-          else
-            echo "No zip found, using repo contents"
-            cp -r . "$RUNNER_TEMP/src/"
-          fi
-          SETTINGS=$(find "$RUNNER_TEMP/src" -maxdepth 3 -name "settings.gradle*" | head -n 1)
-          [ -z "$SETTINGS" ] && { echo "No settings.gradle found in project"; exit 1; }
-          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -53,23 +38,36 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      - name: Build release APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleRelease --no-daemon
-
-      - name: Name the APK
-        run: cp "$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk" "NtfyAlarm-v1.0.${{ github.run_number }}.apk"
+      - name: Extract every zip and build its APK
+        run: |
+          set -e
+          shopt -s nullglob
+          mkdir -p "$RUNNER_TEMP/src" dist
+          zips=(*.zip */*.zip)
+          [ ${#zips[@]} -eq 0 ] && { echo "No zip files found"; exit 1; }
+          for z in "${zips[@]}"; do
+            name=$(basename "$z" .zip)
+            echo "=== $z ==="
+            mkdir -p "$RUNNER_TEMP/src/$name"
+            unzip -q "$z" -d "$RUNNER_TEMP/src/$name"
+            settings=$(find "$RUNNER_TEMP/src/$name" -maxdepth 3 -name "settings.gradle*" | head -n 1)
+            [ -z "$settings" ] && { echo "No settings.gradle in $z"; exit 1; }
+            dir=$(dirname "$settings")
+            (cd "$dir" && gradle assembleRelease --no-daemon)
+            cp "$dir/app/build/outputs/apk/release/app-release.apk" "dist/${name}-v1.0.${{ github.run_number }}.apk"
+          done
+          ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NtfyAlarm-apk
-          path: NtfyAlarm-v1.0.${{ github.run_number }}.apk
+          name: Zing-apks
+          path: dist/*.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: Ntfy Alarm v1.0.${{ github.run_number }}
-          files: NtfyAlarm-v1.0.${{ github.run_number }}.apk
+          name: Zing v1.0.${{ github.run_number }}
+          files: dist/*.apk
           generate_release_notes: true
           
