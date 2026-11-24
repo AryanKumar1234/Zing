@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -18,8 +17,8 @@
         android:theme="@style/Theme.BytlelloService">
 
         <!-- Setup screen. It has no launcher entry of its own; it is reachable only through the
-             alias below, and that alias is disabled as soon as setup finishes, so the app has no
-             icon and never opens a window again. -->
+             alias below, and that alias is disabled only when the user taps Done, so the app has
+             no icon and never opens a window again. -->
         <activity
             android:name=".MainActivity"
             android:excludeFromRecents="true"

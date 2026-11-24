@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Bytlello Service</string>
+    <string name="setup_status">Background running: %1$s\nSound changes (DND): %2$s</string>
 </resources>
