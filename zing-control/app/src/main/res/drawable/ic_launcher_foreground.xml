@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bold slanted "Z" monogram, pink-to-violet gradient fill. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+
+    <path android:pathData="M26,26 L74,26 L74,37.2 L46.8,62.8 L74,62.8 L74,74 L26,74 L26,62.8 L53.2,37.2 L26,37.2 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:angle="45"
+                android:startX="20" android:startY="20"
+                android:endX="88" android:endY="88"
+                android:startColor="#FF2E8F"
+                android:endColor="#7B2FF7" />
+        </aapt:attr>
+    </path>
+
+    <!-- small diagonal glint for a bit of shine -->
+    <path android:fillColor="#40FFFFFF" android:pathData="M30,30 L40,30 L30,54 L26,54 Z" />
+</vector>

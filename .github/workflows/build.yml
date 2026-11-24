@@ -6,6 +6,7 @@ on:
     paths:
       - "**.zip"
       - "bytello-app/**"
+      - "zing-control/**"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 
@@ -51,10 +52,10 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      # A project is built from its committed folder when one exists (bytello-app/), and from its
-      # zip when it does not (zing-control.zip). zing-control signs its own release build; the
-      # Bytello project has no signingConfig, so its APK is signed here — Android refuses to
-      # install an unsigned APK.
+      # A project is built from its committed folder when one exists (bytello-app/, zing-control/),
+      # and from its zip only when no folder of that name is committed. zing-control signs its own
+      # release build; the Bytello project has no signingConfig, so its APK is signed here —
+      # Android refuses to install an unsigned APK.
       - name: Build every project
         run: |
           set -euo pipefail
@@ -84,28 +85,42 @@ jobs:
 
           names=()
           dirs=()
+          seen="|"
 
-          for z in *.zip */*.zip; do
-            name="$(basename "$z" .zip)"
-            dest="$work/$name"
-            mkdir -p "$dest"
-            unzip -q "$z" -d "$dest"
-            settings="$(find "$dest" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
-            [ -n "$settings" ] || { echo "No settings.gradle in $z"; exit 1; }
-            names+=("$name")
-            dirs+=("$(dirname "$settings")")
-          done
+          # name, project directory — each project is built once, folders win over zips.
+          register () {
+            case "$seen" in *"|$1|"*) return 0 ;; esac
+            seen="$seen$1|"
+            names+=("$1")
+            dirs+=("$2")
+          }
 
           for d in */; do
             d="${d%/}"
             case "$d" in .*|work) continue ;; esac
             settings="$(find "$d" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
             [ -n "$settings" ] || continue
-            names+=("$d")
-            dirs+=("$(dirname "$settings")")
+            register "$d" "$(dirname "$settings")"
           done
 
+          for z in *.zip */*.zip; do
+            name="$(basename "$z" .zip)"
+            case "$seen" in *"|$name|"*)
+              echo "Skipping $z: $name/ is committed, the folder is built instead"
+              continue
+              ;;
+            esac
+            dest="$work/$name"
+            mkdir -p "$dest"
+            unzip -q "$z" -d "$dest"
+            settings="$(find "$dest" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
+            [ -n "$settings" ] || { echo "No settings.gradle in $z"; exit 1; }
+            register "$name" "$(dirname "$settings")"
+          done
+
+          echo "Projects to build: ${names[*]}"
           [ "${#names[@]}" -ge 1 ] || { echo "Nothing to build"; exit 1; }
+          [ "${#names[@]}" -eq 2 ] || { echo "Expected 2 projects, found ${#names[@]}: ${names[*]}"; exit 1; }
 
           count=0
           for i in "${!names[@]}"; do
