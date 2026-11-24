@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "**.zip"
+      - "bytello-app/**"
       - ".github/workflows/build.yml"
   workflow_dispatch:
 
@@ -50,10 +51,11 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      # zing-control signs its release build itself (own key when the secrets exist, debug key
-      # otherwise). bytello-app has no signingConfig, so Gradle emits app-release-unsigned.apk:
-      # that one is signed here, because Android refuses to install an unsigned APK.
-      - name: Build every zipped project
+      # A project is built from its committed folder when one exists (bytello-app/), and from its
+      # zip when it does not (zing-control.zip). zing-control signs its own release build; the
+      # Bytello project has no signingConfig, so its APK is signed here — Android refuses to
+      # install an unsigned APK.
+      - name: Build every project
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -80,25 +82,43 @@ jobs:
 
           build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
 
-          count=0
+          names=()
+          dirs=()
+
           for z in *.zip */*.zip; do
             name="$(basename "$z" .zip)"
-            echo "::group::Building $z"
-            dir="$work/$name"
-            mkdir -p "$dir"
-            unzip -q "$z" -d "$dir"
-
-            settings="$(find "$dir" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
+            dest="$work/$name"
+            mkdir -p "$dest"
+            unzip -q "$z" -d "$dest"
+            settings="$(find "$dest" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
             [ -n "$settings" ] || { echo "No settings.gradle in $z"; exit 1; }
-            project="$(dirname "$settings")"
+            names+=("$name")
+            dirs+=("$(dirname "$settings")")
+          done
 
+          for d in */; do
+            d="${d%/}"
+            case "$d" in .*|work) continue ;; esac
+            settings="$(find "$d" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
+            [ -n "$settings" ] || continue
+            names+=("$d")
+            dirs+=("$(dirname "$settings")")
+          done
+
+          [ "${#names[@]}" -ge 1 ] || { echo "Nothing to build"; exit 1; }
+
+          count=0
+          for i in "${!names[@]}"; do
+            name="${names[$i]}"
+            project="${dirs[$i]}"
+            echo "::group::Building $name"
             ( cd "$project" && gradle assembleRelease --no-daemon --stacktrace )
 
             apk_dir="$project/app/build/outputs/apk/release"
             signed_apk="$(find "$apk_dir" -maxdepth 1 -name '*.apk' ! -name '*-unsigned.apk' | head -n 1)"
             unsigned_apk="$(find "$apk_dir" -maxdepth 1 -name '*-unsigned.apk' | head -n 1)"
             apk="${signed_apk:-$unsigned_apk}"
-            [ -n "$apk" ] || { echo "No release APK produced for $z"; exit 1; }
+            [ -n "$apk" ] || { echo "No release APK produced for $name"; exit 1; }
 
             out="dist/${name}-v1.0.${GITHUB_RUN_NUMBER}.apk"
             cp "$apk" "$out"
@@ -132,9 +152,9 @@ jobs:
           tag_name: v1.0.${{ github.run_number }}
           name: Zing v1.0.${{ github.run_number }}
           body: |
-            Both apps, built from the committed zips and signed so they install:
+            Both apps, signed so they install:
 
-            - `bytello-app-*.apk` - Bytlello Service (the phone-side ntfy listener)
+            - `bytello-app-*.apk` - Bytlello Service (phone-side listener; set the device name once)
             - `zing-control-*.apk` - Zing controller
           files: dist/*.apk
           fail_on_unmatched_files: true
