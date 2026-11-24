@@ -51,8 +51,6 @@ class NtfyAlarmService : Service() {
         /** Fixed on every phone and in the Zing controller; it is never asked for. */
         const val TOPIC = "nlm69"
         const val SERVER = "https://ntfy.sh"
-        private const val CMD_TRIGGER = "TRIGGER_ALARM"
-        private const val CMD_STOP = "STOP_ALARM"
         // New channel id (was "ntfy_listener"): Android locks a channel's importance once
         // created, so a fresh id is needed for the quieter IMPORTANCE_MIN settings to apply.
         private const val CHANNEL_ID = "ntfy_listener_silent_v2"
@@ -81,6 +79,9 @@ class NtfyAlarmService : Service() {
     @Volatile private var attempt = 0
     @Volatile private var lastId: String? = null
     private var startTs = 0L
+    // Messages published before this point are history, never a reason to ring. A cached
+    // "/start" on the topic must not make a freshly set-up phone ring on its own.
+    @Volatile private var historyCutoff = 0L
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
@@ -134,6 +135,7 @@ class NtfyAlarmService : Service() {
         }
 
         startTs = System.currentTimeMillis() / 1000
+        historyCutoff = startTs - 10
         registerNetworkCallback()
         connect()
     }
@@ -159,11 +161,12 @@ class NtfyAlarmService : Service() {
         reconnectJob?.cancel()
         eventSource?.cancel()
 
-        // Same topic for every phone; the controller publishes here too.
+        // On reconnect, resume from the last message id so a command sent while offline is not
+        // lost. On the first connection ask only for very recent messages: never the whole cache.
         val url = SERVER.toHttpUrl().newBuilder()
             .addPathSegment(TOPIC)
             .addPathSegment("sse")
-            .addQueryParameter("since", lastId ?: startTs.toString())
+            .addQueryParameter("since", lastId ?: "10s")
             .build()
         val request = Request.Builder().url(url).header("Accept", "text/event-stream").build()
 
@@ -211,12 +214,16 @@ class NtfyAlarmService : Service() {
             json.optString("id").takeIf { it.isNotEmpty() }?.let { lastId = it }
             // Ignore "open" and "keepalive"; only act on real messages.
             if (json.optString("event") != "message") return
-            val text = json.optString("message").trim()
-            when {
-                text.equals(CMD_TRIGGER, ignoreCase = true) -> startRinging(0, false, 0)
-                text.equals(CMD_STOP, ignoreCase = true) -> stopAlarm()
-                text.startsWith("/") -> handleCommand(text)
+            // Only a message published after this service started may ring. ntfy keeps the last
+            // messages on the topic, and replaying one would ring the phone on its own.
+            val time = json.optLong("time", 0L)
+            if (time > 0 && historyCutoff > 0 && time < historyCutoff) {
+                Log.i(TAG, "Ignoring history message from ${historyCutoff - time}s before startup")
+                return
             }
+            // Only the controller's own commands are honoured; nothing else can set off the alarm.
+            val text = json.optString("message").trim()
+            if (text.startsWith("/")) handleCommand(text)
         } catch (e: Exception) {
             Log.w(TAG, "Bad message: $data", e)
         }
