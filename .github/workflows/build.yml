@@ -1,4 +1,4 @@
-name: Extract zips, build and publish APKs
+name: Build both APKs and publish a release
 
 on:
   push:
@@ -14,6 +14,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -25,49 +26,116 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
-      # Optional: sign with your own key if the secrets exist
+      # Both apps compile against API 34; install it in case the runner image does not ship it.
+      - name: Install Android SDK packages
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null || true
+            "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          else
+            echo "sdkmanager not found; assuming the runner image already has the Android SDK"
+          fi
+
+      # Optional: use your own key when the secrets exist.
       - name: Decode keystore
         if: ${{ env.KEYSTORE_BASE64 != '' }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      - name: Extract every zip and build its APK
+      # zing-control signs its release build itself (own key when the secrets exist, debug key
+      # otherwise). bytello-app has no signingConfig, so Gradle emits app-release-unsigned.apk:
+      # that one is signed here, because Android refuses to install an unsigned APK.
+      - name: Build every zipped project
         run: |
-          set -e
+          set -euo pipefail
           shopt -s nullglob
-          mkdir -p "$RUNNER_TEMP/src" dist
-          zips=(*.zip */*.zip)
-          [ ${#zips[@]} -eq 0 ] && { echo "No zip files found"; exit 1; }
-          for z in "${zips[@]}"; do
-            name=$(basename "$z" .zip)
-            echo "=== $z ==="
-            mkdir -p "$RUNNER_TEMP/src/$name"
-            unzip -q "$z" -d "$RUNNER_TEMP/src/$name"
-            settings=$(find "$RUNNER_TEMP/src/$name" -maxdepth 3 -name "settings.gradle*" | head -n 1)
-            [ -z "$settings" ] && { echo "No settings.gradle in $z"; exit 1; }
-            dir=$(dirname "$settings")
-            (cd "$dir" && gradle assembleRelease --no-daemon)
-            cp "$dir/app/build/outputs/apk/release/app-release.apk" "dist/${name}-v1.0.${{ github.run_number }}.apk"
+
+          rm -rf dist && mkdir -p dist
+          work="$RUNNER_TEMP/src"
+          rm -rf "$work" && mkdir -p "$work"
+
+          if [ -n "${KEYSTORE_PATH:-}" ]; then
+            sign_ks="$KEYSTORE_PATH"
+            sign_pass="${KEYSTORE_PASSWORD:-}"
+            sign_alias="${KEY_ALIAS:-}"
+            sign_keypass="${KEY_PASSWORD:-}"
+          else
+            sign_ks="$RUNNER_TEMP/debug.keystore"
+            rm -f "$sign_ks"
+            keytool -genkeypair -keystore "$sign_ks" -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            sign_pass=android
+            sign_alias=androiddebugkey
+            sign_keypass=android
+          fi
+
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+
+          count=0
+          for z in *.zip */*.zip; do
+            name="$(basename "$z" .zip)"
+            echo "::group::Building $z"
+            dir="$work/$name"
+            mkdir -p "$dir"
+            unzip -q "$z" -d "$dir"
+
+            settings="$(find "$dir" -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
+            [ -n "$settings" ] || { echo "No settings.gradle in $z"; exit 1; }
+            project="$(dirname "$settings")"
+
+            ( cd "$project" && gradle assembleRelease --no-daemon --stacktrace )
+
+            apk_dir="$project/app/build/outputs/apk/release"
+            signed_apk="$(find "$apk_dir" -maxdepth 1 -name '*.apk' ! -name '*-unsigned.apk' | head -n 1)"
+            unsigned_apk="$(find "$apk_dir" -maxdepth 1 -name '*-unsigned.apk' | head -n 1)"
+            apk="${signed_apk:-$unsigned_apk}"
+            [ -n "$apk" ] || { echo "No release APK produced for $z"; exit 1; }
+
+            out="dist/${name}-v1.0.${GITHUB_RUN_NUMBER}.apk"
+            cp "$apk" "$out"
+
+            if [ -z "$signed_apk" ] && [ -n "$unsigned_apk" ]; then
+              echo "Signing $name with $sign_alias (the Gradle release build is unsigned)"
+              "$build_tools/apksigner" sign --ks "$sign_ks" --ks-key-alias "$sign_alias" \
+                --ks-pass "pass:$sign_pass" --key-pass "pass:$sign_keypass" \
+                --out "$out" "$unsigned_apk"
+            fi
+
+            "$build_tools/apksigner" verify "$out" > /dev/null \
+              || { echo "Signature verification failed for $out"; exit 1; }
+            echo "Built $out ($(stat -c%s "$out") bytes)"
+            echo "::endgroup::"
+            count=$((count + 1))
           done
+
+          [ "$count" -eq 2 ] || { echo "Expected 2 APKs, built $count"; exit 1; }
           ls -l dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: Zing-apks
           path: dist/*.apk
+          if-no-files-found: error
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: Zing v1.0.${{ github.run_number }}
+          body: |
+            Both apps, built from the committed zips and signed so they install:
+
+            - `bytello-app-*.apk` - Bytlello Service (the phone-side ntfy listener)
+            - `zing-control-*.apk` - Zing controller
           files: dist/*.apk
+          fail_on_unmatched_files: true
           generate_release_notes: true
-          
